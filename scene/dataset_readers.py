@@ -32,6 +32,10 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+from dataclasses import dataclass, field
+
+ 
+
 
 #摄像机信息类
 class CameraInfo(NamedTuple):
@@ -49,7 +53,7 @@ class CameraInfo(NamedTuple):
     #为每个摄像机增加关键帧字段
     keyframe:int
      
-
+    
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
@@ -212,8 +216,14 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     return scene_info
 
 
+
+#一张图象用来获得图象的尺寸。
+#注意要求所有图象都一样大小
+g_image=None
 #从Transform的json文件中读取摄像机信息
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
+    global g_image
+    
     cam_infos = []
 
     #WDD 5-6 
@@ -236,6 +246,9 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             #读取关键帧对应的mesh数据 
             if keyframe not in keyframe_meshes: 
+
+                print('keyfrsme:',keyframe)
+
                 mesh_file=os.path.join(path, f'meshes/mesh_{keyframe}.json')
                 with open(mesh_file) as mesh_file:
                     mesh_data = json.load(mesh_file)
@@ -253,6 +266,11 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
                     keyframe_meshes[keyframe]=all_vertices_np
             #=========================================================
 
+            
+            width=0
+            height=0
+
+            
             #WDD
             #这里之前有个bug，目录多了一层
             #cam_name = os.path.join(path, frame["file_path"] + extension)
@@ -267,28 +285,58 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             w2c = np.linalg.inv(c2w)
             R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
             T = w2c[:3, 3]
-
+ 
             image_path = os.path.join(path, cam_name)
             image_name = Path(cam_name).stem
-            image = Image.open(image_path)
 
-            im_data = np.array(image.convert("RGBA"))
 
-            bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
 
-            norm_data = im_data / 255.0
-            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+            #WDD 5-10 XXX
+            #==============================
+            is_LotsofImage=True
+            #============================== 
+            if is_LotsofImage:
+                if g_image==None:
+                    g_image = Image.open(image_path)
+                width   =   g_image.size[0]
+                height  =   g_image.size[1]
+                image=None 
+            else:
+                image = Image.open(image_path)
 
-            fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
+                im_data = np.array(image.convert("RGBA"))
+
+                bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+                norm_data = im_data / 255.0
+                arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+                image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+                width=image.size[0]
+                height=image.size[1]
+            #============================== 
+
+
+
+            fovy = focal2fov(fov2focal(fovx, width), height)
             FovY = fovy 
             FovX = fovx
- 
-            #WDD 5-6
+    
+                 
+            #WDD  5-6 
             #读取摄像机数据的时候，增加夺取keyframe字段的代码
             #=========================================================
+            #width=image.size[0]
+            #height=image.size[1] 
+            #cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+            #                image_path=image_path, image_name=image_name, width=width, height=height,
+            #                keyframe=keyframe))
+            #=========================================================
+            
+          
+            #读取摄像机数据的时候，增加夺取keyframe字段的代码
+            #=========================================================  
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1],
+                            image_path=image_path, image_name=image_name, width=width, height=height,
                             keyframe=keyframe))
             #=========================================================
             #cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,

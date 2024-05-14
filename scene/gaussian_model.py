@@ -21,6 +21,11 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 
+
+#WDD 5-14 
+#处理旋转的函数
+from utils.ghz_functions import rotmat_to_unitquat,quat_xyzw_to_wxyz,quat_wxyz_to_xyzw,quat_product
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -124,8 +129,42 @@ class GaussianModel:
     
     @property
     def get_rotation(self):
-        return self.rotation_activation(self._rotation)
+        #return self.rotation_activation(self._rotation)
     
+        #WDD 5-14 # ghz
+        # return self.rotation_activation(self._rotation)
+
+        mesh_data=self.keyframe_meshes[self.current_keyframe]
+        indices=self.indices
+
+        # 解析 indices 中的各个部分         
+        v1=mesh_data[indices,0,:].squeeze(1)
+        v2=mesh_data[indices,1,:].squeeze(1)
+        v3=mesh_data[indices,2,:].squeeze(1)
+        
+        # 计算局部坐标系的原点，即  
+        o = (v1 + v2 + v3) / 3
+        
+        # 计算局部坐标系的基向量
+        x = (v1 - o).float()
+        x /= torch.norm(x, dim=1, keepdim=True)
+        
+        n = torch.cross(v2 - v1, v3 - v1, dim=1).float()
+        n /= torch.norm(n, dim=1, keepdim=True)
+
+        y = torch.cross(n, x, dim=1)
+        y /= torch.norm(y, dim=1, keepdim=True)
+
+        # 组成变换矩阵，每个点一个矩阵
+        transform_matrices = torch.stack([x, y, n], dim=-1)
+
+        transform_rotation_q = self.rotation_activation(quat_xyzw_to_wxyz(rotmat_to_unitquat(transform_matrices)))
+
+        rot = self.rotation_activation(self._rotation)
+
+        world_rotation_q = quat_xyzw_to_wxyz(quat_product(quat_wxyz_to_xyzw(transform_rotation_q), quat_wxyz_to_xyzw(rot)))
+        
+        return world_rotation_q
     @property
     def get_xyz(self):
         #WDD 5-2 / 5-6
@@ -185,7 +224,9 @@ class GaussianModel:
         return self.opacity_activation(self._opacity)
     
     def get_covariance(self, scaling_modifier = 1):
-        return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+        # ghz
+        # return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+        return self.covariance_activation(self.get_scaling, scaling_modifier, self.get_rotation)
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -257,6 +298,7 @@ class GaussianModel:
         #WDD 5-1
         #=====================
         #锁定顶点位置
+        # 5-9
         #self._xyz.requires_grad = False
         #=====================
         
@@ -291,6 +333,13 @@ class GaussianModel:
         #=================
         l.extend(['index','loc_x', 'loc_y', 'loc_z'])
         #=================
+        
+        # ghz
+        #=================
+        for i in range(self._rotation.shape[1]):
+            l.append('em_rot_{}'.format(i))
+        #=================
+
         return l
 
     def save_ply(self, path):
@@ -310,6 +359,12 @@ class GaussianModel:
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
 
+        # ghz
+        #=================
+        rotation = self.get_rotation.detach().cpu().numpy()
+        em_rotation = self._rotation.detach().cpu().numpy()
+        #=================
+
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
@@ -325,7 +380,7 @@ class GaussianModel:
         loc_positions   =   self.loc_positions.detach().cpu().numpy() 
 
 
-        attributes = np.concatenate((xyz,em_xyz, normals, f_dc, f_rest, opacities, scale, rotation,indices,loc_positions), axis=1)
+        attributes = np.concatenate((xyz,em_xyz, normals, f_dc, f_rest, opacities, scale, rotation,indices,loc_positions,em_rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)

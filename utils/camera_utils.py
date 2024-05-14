@@ -17,6 +17,23 @@ from utils.graphics_utils import fov2focal
 WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale):
+
+    #WDD 5-10 XXX
+    #=========================================================
+    is_LotsofImage=True
+    #=========================================================
+    if is_LotsofImage:
+        return Camera(colmap_id=cam_info.uid,image_fullname=cam_info.image_path, R=cam_info.R, T=cam_info.T, 
+                    FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+                    image=None, gt_alpha_mask=None,
+                    image_name=cam_info.image_name, uid=id, data_device=args.data_device,
+                    keyframe=cam_info.keyframe)
+
+    #=========================================================
+
+
+  
+
     orig_w, orig_h = cam_info.image.size
 
     if args.resolution in [1, 2, 4, 8]:
@@ -48,7 +65,8 @@ def loadCam(args, id, cam_info, resolution_scale):
 
     #WDD 5-6 
     #增加了keyframe参数
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
+    return Camera(colmap_id=cam_info.uid,image_fullname=cam_info.image_path,
+                  R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,

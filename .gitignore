@@ -2,10 +2,8 @@
 .vscode
 output
 build
-diff_rasterization/diff_rast.egg-info
-diff_rasterization/dist
+diff_rasterization
 tensorboard_3d
 screenshots
 data
-
 SIBR_viewers

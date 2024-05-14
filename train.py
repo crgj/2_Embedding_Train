@@ -26,11 +26,108 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 
 import torch.nn.functional as F
 
+from PIL import Image
+import numpy as np
+from utils.camera_utils import Camera
+
+from utils.general_utils import PILtoTorch 
+import copy
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+import threading
+import time
+#WDD 5-13 
+#一个新的类，用来将多个数据进行缓冲
+class Viewpoint_Buffer:
+    def __init__(self,index,white_background=True):
+        self.index=index
+        self.viewpoint_stack    =   []     #保存缓存的viewpoint数据
+        self.is_loaded         =   False                #判断是否完成了数据的读取
+        self.white_background   =   white_background
+        self.current_index      =   0
+
+        #self.lock = threading.Lock()
+
+    #新增加数据
+    def append(self,viewpoint_cam):
+        self.viewpoint_stack.append(viewpoint_cam)
+
+    #判断是否是最终的一个元素
+    def is_last(self):
+        return self.current_index==len(self.viewpoint_stack)-1
+    #获得数据
+    def pop(self): 
+        viewpoint=self.viewpoint_stack[self.current_index] 
+        self.current_index=self.current_index+1
+        if self.current_index>=len(self.viewpoint_stack):
+            self.current_index=0
+
+        return viewpoint
+    
+    #获得读取shuju
+    def get_is_load(self):
+        return   self.is_loaded 
+    
+
+    #读取数据
+    def load_images(self): 
+        # 创建线程对象，目标函数是 read_data
+        thread = threading.Thread(target=self.load_images_in_thr) 
+        # 启动线程
+        thread.start()
+
+    #在多线程中读取数据
+    def load_images_in_thr(self): 
+        
+        # 假设这里是加载图片的代码
+        #with self.lock:  # 使用锁来确保线程安全
+
+        self.is_loaded = False  
+        for i in range(len(self.viewpoint_stack)):
+            self.viewpoint_stack[i]=self.load_image_to_viewpoint(self.viewpoint_stack[i])
+        self.is_loaded = True
+  
+
+    #在训练过程中 批量读取图象的代码
+    def load_image_to_viewpoint(self,viewpoint_cam):
+        image_path = viewpoint_cam.image_fullname  
+        image = Image.open(image_path)
+
+        im_data = np.array(image.convert("RGBA"))
+ 
+        bg = np.array([1,1,1]) if self.white_background else np.array([0, 0, 0])
+
+        norm_data = im_data / 255.0
+        arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+        image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+
+        resized_image_rgb = PILtoTorch(image, image.size)  
+
+         
+        image=resized_image_rgb[:3, ...] 
+
+        new_viewpoint_cam= Camera(colmap_id=viewpoint_cam.colmap_id,
+                            image_fullname=viewpoint_cam.image_fullname,
+                            R=viewpoint_cam.R, 
+                            T=viewpoint_cam.T, 
+                            FoVx=viewpoint_cam.FoVx, 
+                            FoVy=viewpoint_cam.FoVy, 
+                            image=image, 
+                            gt_alpha_mask=None,
+                            image_name=viewpoint_cam.image_name, 
+                            uid=viewpoint_cam.uid, 
+                            data_device=viewpoint_cam.data_device,
+                            keyframe=viewpoint_cam.keyframe)
+        return new_viewpoint_cam
+
+
+
+
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
@@ -52,6 +149,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+
+    #WDD 5-13
+    #公共变量卸载
+    #用来分配view的缓冲
+    image_count =   30  #一次读取进入内存的图象数量 
+    viewpoint_buffer_stack=[]
+    temp_viewpoint_buffer=None
+
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -77,10 +182,74 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        #if not viewpoint_stack:
+        #    viewpoint_stack = scene.getTrainCameras().copy() 
+        #viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
    
+        #WDD 5-13
+        #增加viewpoint的缓冲分配和多线程读取
+        #当所有缓冲已经都训练完毕了，重新分配缓冲
+        #=======================================================================
+        if not viewpoint_buffer_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+            index=0
+            while viewpoint_stack:
+                sub_stack = Viewpoint_Buffer(index,white_background=dataset.white_background)
+                for i in range(image_count):
+                    if viewpoint_stack:
+                        sub_stack.append(viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1)))
+                 
+                viewpoint_buffer_stack.append(sub_stack)
+                index=index+1
+ 
+            #初始的时候读取前俩个buffer的数据
+            if viewpoint_buffer_stack: 
+                viewpoint_buffer_stack[0].load_images()    
+                if len(viewpoint_buffer_stack)>1:
+                    viewpoint_buffer_stack[1].load_images()   
+                        
+        #初始的时候等待 读取
+        while not viewpoint_buffer_stack[0].get_is_load() and not temp_viewpoint_buffer:
+            # 当前进程暂停1秒
+            time.sleep(1)
+             
+
+        if viewpoint_buffer_stack[0].get_is_load():
+            #获取当前帧
+            viewpoint_cam=viewpoint_buffer_stack[0].pop()
+        else:
+            viewpoint_cam=temp_viewpoint_buffer.pop()
+
+        if viewpoint_buffer_stack[0].is_last(): 
+            if len(viewpoint_buffer_stack)>1:
+                if viewpoint_buffer_stack[1].is_loaded:
+                    viewpoint_buffer_stack.pop(0)
+                    if len(viewpoint_buffer_stack)>1:
+                        viewpoint_buffer_stack[1].load_images() 
+                else:
+                    pass
+            else:    
+                temp_viewpoint_buffer=copy.deepcopy(viewpoint_buffer_stack[0]) 
+                viewpoint_buffer_stack.pop(0)
+
+        #=======================================================================
+
+
+            
+            
+
+
+        #WDD 5-10 XXX
+        #为了防止内存溢出，每词都重新读取图象
+        #训练会慢很多
+        #====================================================================
+        is_LotsofImage=True
+
+        #if is_LotsofImage:
+        #    viewpoint_cam=load_image_to_viewpoint(viewpoint_cam)
+        #====================================================================
+        
+        
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
@@ -132,7 +301,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            #training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            
+            
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -253,10 +424,10 @@ if __name__ == "__main__":
     #==========================================================================================
     #args = parser.parse_args(sys.argv[1:])
     args = parser.parse_args(['-w',
-                              '-s','data/dance',
+                              '-s','data/head',
                               '-r','1',
                               "--save_iterations",'1','5_000', '10_000','30_000','50_000','100_000',
-                              '--iterations','50000', 
+                              '--iterations','30000', 
                               ])
     #==========================================================================================
     
